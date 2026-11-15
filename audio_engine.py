@@ -2,6 +2,11 @@
 Audio Engine for Transparency Mode.
 Handles real-time, low-latency, full-duplex audio passthrough from microphone to headphones
 using sounddevice, numpy, and scipy.signal for bandpass filtering (Voice Boost).
+Features:
+- Left / Right stereo balance control
+- WASAPI and low-latency driver support
+- 300Hz-3400Hz speech bandpass filter
+- Soft limiter & VU level measurement
 """
 
 import threading
@@ -28,21 +33,38 @@ class AudioDevice:
         return "wasapi" in self.hostapi_name.lower()
 
     @property
+    def is_asio(self) -> bool:
+        return "asio" in self.hostapi_name.lower()
+
+    @property
+    def is_wdm_ks(self) -> bool:
+        return "wdm-ks" in self.hostapi_name.lower()
+
+    @property
     def short_api(self) -> str:
         api = self.hostapi_name
         if "wasapi" in api.lower():
             return "WASAPI"
-        elif "directsound" in api.lower():
-            return "DirectSound"
+        elif "asio" in api.lower():
+            return "ASIO"
         elif "wdm-ks" in api.lower():
             return "WDM-KS"
+        elif "directsound" in api.lower():
+            return "DirectSound"
         elif "mme" in api.lower():
             return "MME"
         return api
 
     @property
     def display_name(self) -> str:
-        badge = "WASAPI (Low Latency)" if self.is_wasapi else self.short_api
+        if self.is_wasapi:
+            badge = "WASAPI (Low Latency)"
+        elif self.is_asio:
+            badge = "ASIO (Pro Latency)"
+        elif self.is_wdm_ks:
+            badge = "WDM-KS"
+        else:
+            badge = self.short_api
         return f"[{badge}] {self.name} (#{self.index})"
 
     def __repr__(self) -> str:
@@ -51,7 +73,7 @@ class AudioDevice:
 
 class AudioEngine:
     """
-    Real-time full-duplex audio passthrough engine.
+    Real-time full-duplex audio passthrough engine with Left/Right balance control.
     """
     def __init__(self, on_status_changed: Optional[Callable[[bool, str], None]] = None):
         self._is_running = False
@@ -60,9 +82,10 @@ class AudioEngine:
         self.on_status_changed = on_status_changed
 
         # User controls
-        self._gain: float = 1.0  # 0.0 to 2.0 (0% to 200%)
+        self._gain: float = 1.0       # 0.0 to 2.0 (0% to 200%)
+        self._balance: float = 0.0    # -1.0 (Full Left) to +1.0 (Full Right), 0.0 = Center
         self._voice_boost: bool = False
-        self._blocksize: int = 256  # frames: 128, 256, 512
+        self._blocksize: int = 128     # frames: 64, 128, 256, 512
         self._samplerate: int = 48000
 
         # Filter state
@@ -96,6 +119,15 @@ class AudioEngine:
         self._gain = max(0.0, min(float(value), 2.5))
 
     @property
+    def balance(self) -> float:
+        return self._balance
+
+    @balance.setter
+    def balance(self, value: float):
+        # Clamped between -1.0 (100% Left) and +1.0 (100% Right)
+        self._balance = max(-1.0, min(1.0, float(value)))
+
+    @property
     def voice_boost(self) -> bool:
         return self._voice_boost
 
@@ -117,15 +149,32 @@ class AudioEngine:
 
     @property
     def estimated_latency_ms(self) -> float:
-        """Estimated one-way buffer latency in milliseconds."""
+        """Estimated single-buffer block latency in milliseconds."""
         if self._samplerate > 0 and self._blocksize > 0:
             return (self._blocksize / self._samplerate) * 1000.0
         return 0.0
 
+    @property
+    def actual_latency_ms(self) -> Tuple[float, float, float]:
+        """
+        Returns (in_latency_ms, out_latency_ms, total_roundtrip_ms) reported by driver.
+        """
+        if self._stream and self._is_running:
+            try:
+                lat = self._stream.latency
+                if isinstance(lat, (tuple, list)) and len(lat) >= 2:
+                    in_ms = float(lat[0]) * 1000.0
+                    out_ms = float(lat[1]) * 1000.0
+                    return (in_ms, out_ms, in_ms + out_ms)
+            except Exception:
+                pass
+        b_ms = self.estimated_latency_ms
+        return (b_ms, b_ms, b_ms * 2.0)
+
     @staticmethod
     def get_devices() -> Tuple[List[AudioDevice], List[AudioDevice]]:
         """
-        Enumerate all audio devices and sort them with WASAPI devices prioritized.
+        Enumerate all audio devices and sort them prioritizing WASAPI and ASIO devices.
         Returns: (input_devices, output_devices)
         """
         try:
@@ -158,17 +207,24 @@ class AudioEngine:
             if out_ch > 0:
                 output_devices.append(device_obj)
 
-        # Sort priority: WASAPI first (0), DirectSound (1), MME (2), others (3)
+        # Sort priority:
+        # 0: WASAPI (rock solid low-latency on Windows)
+        # 1: ASIO (pro studio low latency)
+        # 2: DirectSound
+        # 3: WDM-KS
+        # 4: MME
         def sort_key(dev: AudioDevice):
             api_lower = dev.hostapi_name.lower()
             if "wasapi" in api_lower:
                 priority = 0
-            elif "directsound" in api_lower:
+            elif "asio" in api_lower:
                 priority = 1
-            elif "mme" in api_lower:
+            elif "directsound" in api_lower:
                 priority = 2
-            else:
+            elif "wdm-ks" in api_lower:
                 priority = 3
+            else:
+                priority = 4
             return (priority, dev.name.lower())
 
         input_devices.sort(key=sort_key)
@@ -182,7 +238,7 @@ class AudioEngine:
         using Second-Order Sections (SOS) for numerical stability and zero clicks.
         """
         lowcut = 300.0
-        highcut = min(3400.0, (samplerate / 2.0) - 200.0)  # Must be below Nyquist
+        highcut = min(3400.0, (samplerate / 2.0) - 200.0)
         
         try:
             self._filter_sos = signal.butter(
@@ -192,8 +248,7 @@ class AudioEngine:
                 fs=samplerate,
                 output='sos'
             )
-            base_zi = signal.sosfilt_zi(self._filter_sos)  # shape: (n_sections, 2)
-            # Expand zi for multi-channel: (n_sections, 2, channels)
+            base_zi = signal.sosfilt_zi(self._filter_sos)
             self._filter_zi = np.repeat(base_zi[:, :, np.newaxis], channels, axis=2).astype(np.float32)
             self._filter_channels = channels
         except Exception as e:
@@ -203,10 +258,8 @@ class AudioEngine:
             print(f"[AudioEngine] Failed to initialize bandpass filter: {e}")
 
     def _determine_samplerate(self, in_dev_idx: int, out_dev_idx: int, in_ch: int, out_ch: int) -> int:
-        """Find a mutually supported sample rate, prioritizing WASAPI default 48kHz."""
-        candidate_rates = [48000, 44100, 96000, 88200]
-        
-        # Check defaults first
+        """Find a mutually supported sample rate, prioritizing 48kHz."""
+        candidate_rates = [48000, 44100, 96000]
         try:
             out_info = sd.query_devices(out_dev_idx)
             in_info = sd.query_devices(in_dev_idx)
@@ -234,7 +287,7 @@ class AudioEngine:
                         frames: int, time_info, status):
         """
         High-performance real-time duplex audio callback.
-        Routes microphone indata -> headphone outdata with DSP processing.
+        Routes microphone indata -> headphone outdata with DSP processing and L/R balance.
         """
         if status:
             if status.input_overflow or status.output_overflow:
@@ -242,7 +295,6 @@ class AudioEngine:
             if status.input_underflow or status.output_underflow:
                 self.underflow_count += 1
 
-        # Work on a copy or directly on buffer
         data = indata.astype(np.float32, copy=False)
         in_channels = data.shape[1]
         out_channels = outdata.shape[1]
@@ -263,7 +315,6 @@ class AudioEngine:
             data = data * gain
 
         # 3. Soft Limiter (Smooth saturation using tanh when signal exceeds +/- 0.95)
-        # Prevents harsh digital clipping pops while maintaining transparency
         max_abs = np.max(np.abs(data)) if data.size > 0 else 0.0
         if max_abs > 0.95:
             data = np.tanh(data)
@@ -276,18 +327,30 @@ class AudioEngine:
         if in_channels == out_channels:
             outdata[:] = data
         elif in_channels == 1 and out_channels == 2:
-            # Mono to Stereo
             outdata[:, 0] = data[:, 0]
             outdata[:, 1] = data[:, 0]
         elif in_channels >= 2 and out_channels == 1:
-            # Downmix Stereo/Multi to Mono
             outdata[:, 0] = np.mean(data, axis=1)
         else:
-            # General fallback: replicate or truncate
             min_ch = min(in_channels, out_channels)
             outdata[:, :min_ch] = data[:, :min_ch]
             if out_channels > min_ch:
                 outdata[:, min_ch:] = 0.0
+
+        # 6. Left / Right Stereo Balance
+        if out_channels >= 2 and self._balance != 0.0:
+            bal = self._balance
+            if bal < 0.0:
+                # Pan toward Left: Left remains 1.0, Right is attenuated
+                l_factor = 1.0
+                r_factor = 1.0 + bal  # bal is negative: drops from 1.0 to 0.0
+            else:
+                # Pan toward Right: Right remains 1.0, Left is attenuated
+                l_factor = 1.0 - bal  # bal is positive: drops from 1.0 to 0.0
+                r_factor = 1.0
+
+            outdata[:, 0] *= l_factor
+            outdata[:, 1] *= r_factor
 
     def start(self, input_device: AudioDevice, output_device: AudioDevice, 
               blocksize: Optional[int] = None) -> bool:
@@ -311,11 +374,9 @@ class AudioEngine:
                 input_device.index, output_device.index, in_ch, out_ch
             )
 
-            # Setup filter for this samplerate and channel configuration
             self._setup_bandpass_filter(self._samplerate, in_ch)
 
             try:
-                # Open real-time full-duplex stream
                 self._stream = sd.Stream(
                     device=(input_device.index, output_device.index),
                     samplerate=self._samplerate,
