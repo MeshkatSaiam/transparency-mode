@@ -3,7 +3,7 @@ Transparency Mode - Windows Desktop Application
 Built with CustomTkinter, SoundDevice, NumPy, Scipy, and Keyboard.
 
 Allows seamless audio passthrough from microphone to headphones with:
-- Low-latency WASAPI stream routing
+- Low-latency WASAPI stream routing with Exclusive Mode support
 - Passthrough Gain slider (0% to 200%)
 - Left / Right Stereo Balance slider (-100% to +100%)
 - Voice Boost speech band-pass filter (300Hz - 3400Hz)
@@ -30,8 +30,8 @@ class TransparencyApp(ctk.CTk):
         super().__init__()
 
         self.title("Transparency Mode")
-        self.geometry("560x780")
-        self.minsize(520, 720)
+        self.geometry("560x820")
+        self.minsize(520, 740)
         self.resizable(True, True)
 
         # Initialize audio engine
@@ -103,7 +103,7 @@ class TransparencyApp(ctk.CTk):
 
         self.latency_badge = ctk.CTkLabel(
             badge_frame,
-            text="Driver Buffer: 128 frames (2.7 ms)",
+            text="Buffer: 128 frames (2.7 ms)",
             font=ctk.CTkFont(size=11),
             text_color="#38bdf8",
             fg_color="#0f172a",
@@ -329,7 +329,7 @@ class TransparencyApp(ctk.CTk):
 
         # C) Voice Boost Switch
         voice_row = ctk.CTkFrame(controls_card, fg_color="transparent")
-        voice_row.pack(fill="x", padx=14, pady=4)
+        voice_row.pack(fill="x", padx=14, pady=3)
 
         voice_info = ctk.CTkFrame(voice_row, fg_color="transparent")
         voice_info.pack(side="left", fill="x", expand=True)
@@ -361,10 +361,44 @@ class TransparencyApp(ctk.CTk):
         )
         self.voice_switch.pack(side="right")
 
+        # D) WASAPI Exclusive Mode Switch
+        excl_row = ctk.CTkFrame(controls_card, fg_color="transparent")
+        excl_row.pack(fill="x", padx=14, pady=3)
+
+        excl_info = ctk.CTkFrame(excl_row, fg_color="transparent")
+        excl_info.pack(side="left", fill="x", expand=True)
+
+        excl_title = ctk.CTkLabel(
+            excl_info,
+            text="⚡ WASAPI Exclusive Mode (Direct Hardware Access)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#e2e8f0"
+        )
+        excl_title.pack(anchor="w")
+
+        excl_desc = ctk.CTkLabel(
+            excl_info,
+            text="Bypasses Windows Audio Engine (audiodg.exe) buffer for lowest latency",
+            font=ctk.CTkFont(size=10),
+            text_color="#94a3b8"
+        )
+        excl_desc.pack(anchor="w")
+
+        self.exclusive_switch = ctk.CTkSwitch(
+            excl_row,
+            text="",
+            width=46,
+            command=self._on_exclusive_toggled,
+            progress_color="#0284c7",
+            button_color="#e0f2fe",
+            button_hover_color="#bae6fd"
+        )
+        self.exclusive_switch.pack(side="right")
+
         sep2 = ctk.CTkFrame(controls_card, height=1, fg_color="#334155")
         sep2.pack(fill="x", padx=14, pady=4)
 
-        # D) Buffer Size / Latency Selector
+        # E) Buffer Size / Latency Selector
         buffer_row = ctk.CTkFrame(controls_card, fg_color="transparent")
         buffer_row.pack(fill="x", padx=14, pady=(4, 10))
 
@@ -433,7 +467,7 @@ class TransparencyApp(ctk.CTk):
 
         brand_lbl = ctk.CTkLabel(
             footer,
-            text="Transparency Mode v1.1",
+            text="Transparency Mode v1.2",
             font=ctk.CTkFont(size=11),
             text_color="#64748b"
         )
@@ -532,6 +566,7 @@ class TransparencyApp(ctk.CTk):
             self.input_dropdown.configure(state="disabled")
             self.output_dropdown.configure(state="disabled")
             self.blocksize_menu.configure(state="disabled")
+            self.exclusive_switch.configure(state="disabled")
         else:
             self.toggle_btn.configure(
                 text="🔊  ACTIVATE TRANSPARENCY MODE",
@@ -545,6 +580,7 @@ class TransparencyApp(ctk.CTk):
             self.input_dropdown.configure(state="normal")
             self.output_dropdown.configure(state="normal")
             self.blocksize_menu.configure(state="normal")
+            self.exclusive_switch.configure(state="normal")
             self.vu_progress.set(0.0)
             self.meter_db_lbl.configure(text="-∞ dB")
 
@@ -596,6 +632,10 @@ class TransparencyApp(ctk.CTk):
         enabled = self.voice_switch.get() == 1
         self.audio_engine.voice_boost = enabled
 
+    def _on_exclusive_toggled(self):
+        enabled = self.exclusive_switch.get() == 1
+        self.audio_engine.wasapi_exclusive = enabled
+
     def _parse_blocksize(self, val_str: str) -> int:
         if "64" in val_str:
             return 64
@@ -614,8 +654,9 @@ class TransparencyApp(ctk.CTk):
         rate = self.audio_engine.samplerate or 48000
         bs = self._parse_blocksize(self.blocksize_menu.get())
         ms = (bs / rate) * 1000.0
+        mode_str = "Exclusive" if self.audio_engine.wasapi_exclusive else "Shared"
         self.latency_badge.configure(
-            text=f"Buffer: {ms:.1f} ms ({rate} Hz / {bs} frames)"
+            text=f"Buffer: {ms:.1f} ms ({mode_str} / {bs} frames)"
         )
 
     def _setup_global_hotkey(self):
