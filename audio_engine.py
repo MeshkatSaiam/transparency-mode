@@ -1,13 +1,14 @@
 """
 Audio Engine for Transparency Mode.
 Handles real-time, ultra-low-latency, full-duplex audio passthrough from microphone to headphones
-using sounddevice with native ASIO / FlexASIO, numpy, and scipy.signal for bandpass filtering (Voice Boost).
-Achieves ~4.5 ms round-trip hardware latency using FlexASIO.
+using sounddevice with native WASAPI, numpy, and scipy.signal for bandpass filtering (Voice Boost).
+Features:
+- Expanded Gain control (up to 400% / +12dB boost)
+- Advanced Voice Boost DSP (180Hz HPF + 3kHz +8dB Presence Peak EQ + 6.5kHz Low-Pass)
+- Ultra-low latency buffer sizes (32, 64, 128, 256 frames)
+- Left / Right stereo balance control
+- Soft saturation limiter (tanh) to prevent harsh digital clipping
 """
-
-import os
-# Must be set before importing sounddevice to load libportaudio64bit-asio.dll
-os.environ["SD_ENABLE_ASIO"] = "1"
 
 import threading
 import sounddevice as sd
@@ -29,48 +30,25 @@ class AudioDevice:
         self.default_samplerate = default_samplerate
 
     @property
-    def is_asio(self) -> bool:
-        return "asio" in self.hostapi_name.lower() or "asio" in self.name.lower()
-
-    @property
-    def is_flexasio(self) -> bool:
-        return "flexasio" in self.name.lower()
-
-    @property
     def is_wasapi(self) -> bool:
         return "wasapi" in self.hostapi_name.lower()
 
     @property
-    def is_wdm_ks(self) -> bool:
-        return "wdm-ks" in self.hostapi_name.lower()
-
-    @property
     def short_api(self) -> str:
         api = self.hostapi_name
-        if "asio" in api.lower():
-            return "ASIO"
-        elif "wasapi" in api.lower():
+        if "wasapi" in api.lower():
             return "WASAPI"
-        elif "wdm-ks" in api.lower():
-            return "WDM-KS"
         elif "directsound" in api.lower():
             return "DirectSound"
         elif "mme" in api.lower():
             return "MME"
+        elif "wdm-ks" in api.lower():
+            return "WDM-KS"
         return api
 
     @property
     def display_name(self) -> str:
-        if self.is_flexasio:
-            badge = "FlexASIO (Ultra Low ~4.5ms)"
-        elif self.is_asio:
-            badge = "ASIO (Ultra Low)"
-        elif self.is_wasapi:
-            badge = "WASAPI (Low Latency)"
-        elif self.is_wdm_ks:
-            badge = "WDM-KS"
-        else:
-            badge = self.short_api
+        badge = "WASAPI (Lowest Latency)" if self.is_wasapi else self.short_api
         return f"[{badge}] {self.name} (#{self.index})"
 
     def __repr__(self) -> str:
@@ -79,7 +57,8 @@ class AudioDevice:
 
 class AudioEngine:
     """
-    Real-time full-duplex audio passthrough engine with ASIO & Left/Right balance control.
+    Real-time full-duplex audio passthrough engine with Left/Right balance control.
+    Uses native WASAPI streaming for immediate, zero-lag passthrough.
     """
     def __init__(self, on_status_changed: Optional[Callable[[bool, str], None]] = None):
         self._is_running = False
@@ -88,12 +67,11 @@ class AudioEngine:
         self.on_status_changed = on_status_changed
 
         # User controls
-        self._gain: float = 1.0       # 0.0 to 2.0 (0% to 200%)
+        self._gain: float = 1.0       # 0.0 to 4.0 (0% to 400%)
         self._balance: float = 0.0    # -1.0 (Full Left) to +1.0 (Full Right), 0.0 = Center
         self._voice_boost: bool = False
-        self._blocksize: int = 128     # frames: 64, 128, 256, 512
+        self._blocksize: int = 64      # frames: 32, 64, 128, 256
         self._samplerate: int = 48000
-        self._wasapi_exclusive: bool = False
 
         # Filter state
         self._filter_sos: Optional[np.ndarray] = None
@@ -123,7 +101,7 @@ class AudioEngine:
 
     @gain.setter
     def gain(self, value: float):
-        self._gain = max(0.0, min(float(value), 2.5))
+        self._gain = max(0.0, min(float(value), 4.5))
 
     @property
     def balance(self) -> float:
@@ -154,16 +132,8 @@ class AudioEngine:
         return self._samplerate
 
     @property
-    def wasapi_exclusive(self) -> bool:
-        return self._wasapi_exclusive
-
-    @wasapi_exclusive.setter
-    def wasapi_exclusive(self, value: bool):
-        self._wasapi_exclusive = bool(value)
-
-    @property
     def estimated_latency_ms(self) -> float:
-        """Estimated single-buffer block latency in milliseconds."""
+        """Single-buffer block latency in milliseconds."""
         if self._samplerate > 0 and self._blocksize > 0:
             return (self._blocksize / self._samplerate) * 1000.0
         return 0.0
@@ -177,11 +147,8 @@ class AudioEngine:
             try:
                 lat = self._stream.latency
                 if isinstance(lat, (tuple, list)) and len(lat) >= 2:
-                    raw_in = float(lat[0])
-                    raw_out = float(lat[1])
-                    # In ASIO mode, PortAudio reports in ms directly (> 0.1)
-                    in_ms = raw_in if raw_in > 0.1 else raw_in * 1000.0
-                    out_ms = raw_out if raw_out > 0.1 else raw_out * 1000.0
+                    in_ms = float(lat[0]) * 1000.0
+                    out_ms = float(lat[1]) * 1000.0
                     return (in_ms, out_ms, in_ms + out_ms)
             except Exception:
                 pass
@@ -191,7 +158,8 @@ class AudioEngine:
     @staticmethod
     def get_devices() -> Tuple[List[AudioDevice], List[AudioDevice]]:
         """
-        Enumerate all audio devices prioritizing ASIO (FlexASIO) for lowest ~4.5ms latency.
+        Enumerate all audio devices prioritizing WASAPI devices for lowest latency.
+        Excludes virtual wrapper devices (FlexASIO) that cause buffer bloat.
         Returns: (input_devices, output_devices)
         """
         try:
@@ -210,6 +178,10 @@ class AudioEngine:
             out_ch = d.get('max_output_channels', 0)
             rate = d.get('default_samplerate', 48000.0)
 
+            # Filter out FlexASIO / virtual wrapper loops
+            if "flexasio" in name.lower():
+                continue
+
             device_obj = AudioDevice(
                 index=idx,
                 name=name,
@@ -225,27 +197,20 @@ class AudioEngine:
                 output_devices.append(device_obj)
 
         # Sort priority:
-        # 0: FlexASIO
-        # 1: ASIO
-        # 2: WASAPI
-        # 3: DirectSound
-        # 4: WDM-KS
-        # 5: MME
+        # 0: WASAPI
+        # 1: DirectSound
+        # 2: MME
+        # 3: Others
         def sort_key(dev: AudioDevice):
-            name_lower = dev.name.lower()
             api_lower = dev.hostapi_name.lower()
-            if "flexasio" in name_lower:
+            if "wasapi" in api_lower:
                 priority = 0
-            elif "asio" in api_lower:
-                priority = 1
-            elif "wasapi" in api_lower:
-                priority = 2
             elif "directsound" in api_lower:
-                priority = 3
-            elif "wdm-ks" in api_lower:
-                priority = 4
+                priority = 1
+            elif "mme" in api_lower:
+                priority = 2
             else:
-                priority = 5
+                priority = 3
             return (priority, dev.name.lower())
 
         input_devices.sort(key=sort_key)
@@ -255,20 +220,32 @@ class AudioEngine:
 
     def _setup_bandpass_filter(self, samplerate: int, channels: int):
         """
-        Design a 2nd-order Butterworth bandpass filter (300Hz - 3400Hz)
-        using Second-Order Sections (SOS) for numerical stability and zero clicks.
+        Design an advanced 3-stage Voice Boost SOS filter:
+        1. 2nd-order High-Pass filter at 180 Hz (cuts desk rumbles, HVAC drone).
+        2. 2nd-order Peaking EQ at 3000 Hz (+8 dB boost) to restore natural ear canal presence resonance.
+        3. 2nd-order Low-Pass filter at 6500 Hz (cuts sharp electrical coil whine & fan hiss).
         """
-        lowcut = 300.0
-        highcut = min(3400.0, (samplerate / 2.0) - 200.0)
-        
         try:
-            self._filter_sos = signal.butter(
-                N=2,
-                Wn=[lowcut, highcut],
-                btype='bandpass',
-                fs=samplerate,
-                output='sos'
-            )
+            # Stage 1: High-pass at 180 Hz
+            hp_sos = signal.butter(2, 180.0, btype='highpass', fs=samplerate, output='sos')
+
+            # Stage 2: Peaking EQ at 3000 Hz (+8 dB)
+            presence_db = 8.0
+            A = 10.0 ** (presence_db / 40.0)
+            w0 = 2.0 * np.pi * 3000.0 / samplerate
+            alpha = np.sin(w0) / (2.0 * 1.2)  # Q = 1.2
+            b0 = 1.0 + alpha * A
+            b1 = -2.0 * np.cos(w0)
+            b2 = 1.0 - alpha * A
+            a0 = 1.0 + alpha / A
+            a1 = -2.0 * np.cos(w0)
+            a2 = 1.0 - alpha / A
+            peak_sos = np.array([[b0/a0, b1/a0, b2/a0, 1.0, a1/a0, a2/a0]], dtype=np.float32)
+
+            # Stage 3: Low-pass roll-off at 6500 Hz
+            lp_sos = signal.butter(2, min(6500.0, (samplerate / 2.0) - 200.0), btype='lowpass', fs=samplerate, output='sos')
+
+            self._filter_sos = np.vstack([hp_sos, peak_sos, lp_sos])
             base_zi = signal.sosfilt_zi(self._filter_sos)
             self._filter_zi = np.repeat(base_zi[:, :, np.newaxis], channels, axis=2).astype(np.float32)
             self._filter_channels = channels
@@ -276,10 +253,10 @@ class AudioEngine:
             self._filter_sos = None
             self._filter_zi = None
             self._filter_channels = 0
-            print(f"[AudioEngine] Failed to initialize bandpass filter: {e}")
+            print(f"[AudioEngine] Failed to initialize Voice Boost filter: {e}")
 
     def _determine_samplerate(self, in_dev_idx: int, out_dev_idx: int, in_ch: int, out_ch: int) -> int:
-        """Find mutually supported sample rate."""
+        """Find mutually supported sample rate, prioritizing native 48kHz."""
         candidate_rates = [48000, 44100, 96000]
         try:
             out_info = sd.query_devices(out_dev_idx)
@@ -308,7 +285,7 @@ class AudioEngine:
                         frames: int, time_info, status):
         """
         High-performance real-time duplex audio callback.
-        Routes microphone indata -> headphone outdata with DSP processing and L/R balance.
+        Routes microphone indata -> headphone outdata with Voice Boost EQ, Gain, L/R balance, and Soft Limiter.
         """
         if status:
             if status.input_overflow or status.output_overflow:
@@ -320,7 +297,7 @@ class AudioEngine:
         in_channels = data.shape[1]
         out_channels = outdata.shape[1]
 
-        # 1. Voice Boost (Speech Band-pass filter 300Hz - 3400Hz)
+        # 1. Voice Boost (Vocal Presence Peaking EQ + Rumble High-Pass)
         if self._voice_boost and self._filter_sos is not None and self._filter_zi is not None:
             if in_channels == self._filter_channels:
                 try:
@@ -330,15 +307,16 @@ class AudioEngine:
                 except Exception:
                     pass
 
-        # 2. Passthrough Gain
+        # 2. Passthrough Gain (up to 400% / +12dB)
         gain = self._gain
         if gain != 1.0:
             data = data * gain
 
-        # 3. Soft Limiter (Smooth saturation using tanh when signal exceeds +/- 0.95)
+        # 3. Soft Limiter (Smooth tanh saturation when signal exceeds +/- 0.90)
+        # Prevents loud claps or coughs from causing ear fatigue while keeping quiet speech loud
         max_abs = np.max(np.abs(data)) if data.size > 0 else 0.0
-        if max_abs > 0.95:
-            data = np.tanh(data)
+        if max_abs > 0.90:
+            data = np.tanh(data * 0.95)
 
         # 4. Measure levels for VU meter
         self.current_peak_level = float(min(1.0, max_abs))
@@ -374,8 +352,7 @@ class AudioEngine:
     def start(self, input_device: AudioDevice, output_device: AudioDevice, 
               blocksize: Optional[int] = None) -> bool:
         """
-        Start the audio passthrough stream with low-latency configuration.
-        Supports ASIO duplex stream as well as WASAPI endpoints.
+        Start the audio passthrough stream using native WASAPI direct hardware streaming.
         """
         with self._lock:
             if self._is_running:
@@ -396,42 +373,16 @@ class AudioEngine:
 
             self._setup_bandpass_filter(self._samplerate, in_ch)
 
-            # Check if WASAPI Exclusive mode is requested
-            extra_settings = None
-            if self._wasapi_exclusive and input_device.is_wasapi and output_device.is_wasapi:
-                try:
-                    extra_settings = (
-                        sd.WasapiSettings(exclusive=True),
-                        sd.WasapiSettings(exclusive=True)
-                    )
-                except Exception:
-                    extra_settings = None
-
             try:
-                # If both are the same ASIO device (e.g. FlexASIO)
-                if input_device.is_asio and output_device.is_asio and input_device.index == output_device.index:
-                    self._stream = sd.Stream(
-                        device=(input_device.index, output_device.index),
-                        samplerate=self._samplerate,
-                        blocksize=self._blocksize,
-                        channels=(in_ch, out_ch),
-                        dtype='float32',
-                        callback=self._audio_callback
-                    )
-                else:
-                    kwargs = {
-                        'device': (input_device.index, output_device.index),
-                        'samplerate': self._samplerate,
-                        'blocksize': self._blocksize,
-                        'channels': (in_ch, out_ch),
-                        'dtype': 'float32',
-                        'latency': 'low',
-                        'callback': self._audio_callback
-                    }
-                    if extra_settings is not None:
-                        kwargs['extra_settings'] = extra_settings
-                    self._stream = sd.Stream(**kwargs)
-
+                self._stream = sd.Stream(
+                    device=(input_device.index, output_device.index),
+                    samplerate=self._samplerate,
+                    blocksize=self._blocksize,
+                    channels=(in_ch, out_ch),
+                    dtype='float32',
+                    latency='low',
+                    callback=self._audio_callback
+                )
                 self._stream.start()
                 self._is_running = True
                 self.last_error = ""

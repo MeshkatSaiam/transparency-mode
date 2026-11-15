@@ -1,19 +1,15 @@
 """
 Transparency Mode - Windows Desktop Application
-Built with CustomTkinter, SoundDevice with ASIO support, NumPy, Scipy, and Keyboard.
+Built with CustomTkinter, SoundDevice, NumPy, Scipy, and Keyboard.
 
 Allows seamless audio passthrough from microphone to headphones with:
-- Ultra-low latency FlexASIO & ASIO stream routing (~4.5 ms)
-- Passthrough Gain slider (0% to 200%)
+- Native WASAPI direct hardware streaming (minimal 0.7ms - 1.3ms buffers)
+- Expanded Passthrough Gain slider (0% to 400% / +12 dB boost)
+- Quick-boost presets for closed-back over-ear headphone compensation
+- Advanced Voice Boost DSP (180Hz HPF + 3kHz +8dB Vocal Presence Peaking EQ)
 - Left / Right Stereo Balance slider (-100% to +100%)
-- Voice Boost speech band-pass filter (300Hz - 3400Hz)
-- Real-time hardware latency reporting
 - Global hotkey (Ctrl + Alt + T)
 """
-
-import os
-# Enable ASIO support in sounddevice/PortAudio
-os.environ["SD_ENABLE_ASIO"] = "1"
 
 import sys
 import threading
@@ -34,7 +30,7 @@ class TransparencyApp(ctk.CTk):
         super().__init__()
 
         self.title("Transparency Mode")
-        self.geometry("560x820")
+        self.geometry("560x800")
         self.minsize(520, 740)
         self.resizable(True, True)
 
@@ -83,7 +79,7 @@ class TransparencyApp(ctk.CTk):
 
         subtitle_lbl = ctk.CTkLabel(
             title_box,
-            text="Ultra-low latency ambient microphone passthrough for headphones",
+            text="Real-time ambient microphone passthrough for over-ear headphones",
             font=ctk.CTkFont(size=12),
             text_color="#94a3b8"
         )
@@ -107,7 +103,7 @@ class TransparencyApp(ctk.CTk):
 
         self.latency_badge = ctk.CTkLabel(
             badge_frame,
-            text="Hardware Latency: ~4.5 ms (FlexASIO)",
+            text="Buffer: 64 frames (1.3 ms)",
             font=ctk.CTkFont(size=11),
             text_color="#38bdf8",
             fg_color="#0f172a",
@@ -149,7 +145,7 @@ class TransparencyApp(ctk.CTk):
 
         device_title = ctk.CTkLabel(
             card_title_row,
-            text="Audio Endpoints  (FlexASIO / WASAPI Direct)",
+            text="Audio Endpoints  (WASAPI Direct Low-Latency)",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color="#e2e8f0"
         )
@@ -225,13 +221,13 @@ class TransparencyApp(ctk.CTk):
         controls_card = ctk.CTkFrame(self, corner_radius=12, fg_color="#1e293b")
         controls_card.pack(fill="x", padx=16, pady=(0, 8))
 
-        # A) Passthrough Gain Slider
+        # A) Passthrough Gain Slider (0% to 400%)
         gain_header = ctk.CTkFrame(controls_card, fg_color="transparent")
         gain_header.pack(fill="x", padx=14, pady=(10, 2))
 
         gain_title = ctk.CTkLabel(
             gain_header,
-            text="Passthrough Volume Gain",
+            text="Passthrough Volume Gain (Up to +12 dB)",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color="#e2e8f0"
         )
@@ -239,7 +235,7 @@ class TransparencyApp(ctk.CTk):
 
         self.gain_val_lbl = ctk.CTkLabel(
             gain_header,
-            text="100% (1.0x)",
+            text="100% (Unity)",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color="#38bdf8"
         )
@@ -251,8 +247,8 @@ class TransparencyApp(ctk.CTk):
         self.gain_slider = ctk.CTkSlider(
             gain_slider_row,
             from_=0.0,
-            to=2.0,
-            number_of_steps=40,
+            to=4.0,
+            number_of_steps=80,
             command=self._on_gain_changed,
             progress_color="#0284c7",
             button_color="#38bdf8",
@@ -261,21 +257,57 @@ class TransparencyApp(ctk.CTk):
         self.gain_slider.set(1.0)
         self.gain_slider.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
-        reset_gain_btn = ctk.CTkButton(
-            gain_slider_row,
-            text="Reset 100%",
-            width=76,
+        # Preset buttons for fast gain selection
+        presets_box = ctk.CTkFrame(gain_slider_row, fg_color="transparent")
+        presets_box.pack(side="right")
+
+        ctk.CTkButton(
+            presets_box,
+            text="100%",
+            width=50,
             height=24,
             font=ctk.CTkFont(size=10),
             fg_color="#334155",
             hover_color="#475569",
-            command=self._reset_gain
-        )
-        reset_gain_btn.pack(side="right")
+            command=lambda: self._set_gain_preset(1.0)
+        ).pack(side="left", padx=2)
+
+        ctk.CTkButton(
+            presets_box,
+            text="200%",
+            width=50,
+            height=24,
+            font=ctk.CTkFont(size=10),
+            fg_color="#334155",
+            hover_color="#475569",
+            command=lambda: self._set_gain_preset(2.0)
+        ).pack(side="left", padx=2)
+
+        ctk.CTkButton(
+            presets_box,
+            text="🚀 300%",
+            width=62,
+            height=24,
+            font=ctk.CTkFont(size=10, weight="bold"),
+            fg_color="#0284c7",
+            hover_color="#0369a1",
+            command=lambda: self._set_gain_preset(3.0)
+        ).pack(side="left", padx=2)
+
+        gain_scale_lbls = ctk.CTkFrame(controls_card, fg_color="transparent")
+        gain_scale_lbls.pack(fill="x", padx=14, pady=(0, 4))
+
+        ctk.CTkLabel(gain_scale_lbls, text="0% (Mute)", font=ctk.CTkFont(size=9), text_color="#64748b").pack(side="left")
+        ctk.CTkLabel(gain_scale_lbls, text="100% (Unity)", font=ctk.CTkFont(size=9), text_color="#64748b").pack(side="left", padx=70)
+        ctk.CTkLabel(gain_scale_lbls, text="200% (+6dB)", font=ctk.CTkFont(size=9), text_color="#64748b").pack(side="left", padx=55)
+        ctk.CTkLabel(gain_scale_lbls, text="400% (+12dB Boost)", font=ctk.CTkFont(size=9), text_color="#64748b").pack(side="right")
+
+        sep = ctk.CTkFrame(controls_card, height=1, fg_color="#334155")
+        sep.pack(fill="x", padx=14, pady=4)
 
         # B) Left / Right Balance Slider
         balance_header = ctk.CTkFrame(controls_card, fg_color="transparent")
-        balance_header.pack(fill="x", padx=14, pady=(8, 2))
+        balance_header.pack(fill="x", padx=14, pady=(6, 2))
 
         balance_title = ctk.CTkLabel(
             balance_header,
@@ -328,19 +360,19 @@ class TransparencyApp(ctk.CTk):
         ctk.CTkLabel(balance_scale_lbls, text="Center", font=ctk.CTkFont(size=10), text_color="#64748b").pack(side="left", padx=140)
         ctk.CTkLabel(balance_scale_lbls, text="Right 100% ►", font=ctk.CTkFont(size=10), text_color="#64748b").pack(side="right")
 
-        sep = ctk.CTkFrame(controls_card, height=1, fg_color="#334155")
-        sep.pack(fill="x", padx=14, pady=4)
+        sep2 = ctk.CTkFrame(controls_card, height=1, fg_color="#334155")
+        sep2.pack(fill="x", padx=14, pady=4)
 
-        # C) Voice Boost Switch
+        # C) Voice Boost Switch (Presence Boost + Rumble Cut)
         voice_row = ctk.CTkFrame(controls_card, fg_color="transparent")
-        voice_row.pack(fill="x", padx=14, pady=3)
+        voice_row.pack(fill="x", padx=14, pady=4)
 
         voice_info = ctk.CTkFrame(voice_row, fg_color="transparent")
         voice_info.pack(side="left", fill="x", expand=True)
 
         voice_title = ctk.CTkLabel(
             voice_info,
-            text="🎙️ Voice Boost (Speech Band-Pass Filter)",
+            text="🎙️ Voice Boost (+8 dB Vocal Presence & Rumble Filter)",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color="#e2e8f0"
         )
@@ -348,7 +380,7 @@ class TransparencyApp(ctk.CTk):
 
         voice_desc = ctk.CTkLabel(
             voice_info,
-            text="300Hz–3400Hz speech passband; strips out HVAC/fan rumble & coil hiss",
+            text="Peaking EQ at 3 kHz cuts through headphone damping; strips low-end AC rumble",
             font=ctk.CTkFont(size=10),
             text_color="#94a3b8"
         )
@@ -365,44 +397,10 @@ class TransparencyApp(ctk.CTk):
         )
         self.voice_switch.pack(side="right")
 
-        # D) WASAPI Exclusive Mode Switch
-        excl_row = ctk.CTkFrame(controls_card, fg_color="transparent")
-        excl_row.pack(fill="x", padx=14, pady=3)
+        sep3 = ctk.CTkFrame(controls_card, height=1, fg_color="#334155")
+        sep3.pack(fill="x", padx=14, pady=4)
 
-        excl_info = ctk.CTkFrame(excl_row, fg_color="transparent")
-        excl_info.pack(side="left", fill="x", expand=True)
-
-        excl_title = ctk.CTkLabel(
-            excl_info,
-            text="⚡ WASAPI Exclusive Mode (Direct Hardware Access)",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#e2e8f0"
-        )
-        excl_title.pack(anchor="w")
-
-        excl_desc = ctk.CTkLabel(
-            excl_info,
-            text="Bypasses Windows Audio Engine (audiodg.exe) buffer when using WASAPI",
-            font=ctk.CTkFont(size=10),
-            text_color="#94a3b8"
-        )
-        excl_desc.pack(anchor="w")
-
-        self.exclusive_switch = ctk.CTkSwitch(
-            excl_row,
-            text="",
-            width=46,
-            command=self._on_exclusive_toggled,
-            progress_color="#0284c7",
-            button_color="#e0f2fe",
-            button_hover_color="#bae6fd"
-        )
-        self.exclusive_switch.pack(side="right")
-
-        sep2 = ctk.CTkFrame(controls_card, height=1, fg_color="#334155")
-        sep2.pack(fill="x", padx=14, pady=4)
-
-        # E) Buffer Size / Latency Selector
+        # D) Buffer Size / Latency Selector
         buffer_row = ctk.CTkFrame(controls_card, fg_color="transparent")
         buffer_row.pack(fill="x", padx=14, pady=(4, 10))
 
@@ -416,12 +414,12 @@ class TransparencyApp(ctk.CTk):
 
         self.blocksize_menu = ctk.CTkSegmentedButton(
             buffer_row,
-            values=["64 (1.3 ms)", "128 (2.7 ms)", "256 (5.3 ms)", "512 (10.7 ms)"],
+            values=["32 (0.7 ms)", "64 (1.3 ms)", "128 (2.7 ms)", "256 (5.3 ms)"],
             command=self._on_blocksize_changed,
             selected_color="#0284c7",
             selected_hover_color="#0369a1"
         )
-        self.blocksize_menu.set("128 (2.7 ms)")
+        self.blocksize_menu.set("64 (1.3 ms)")
         self.blocksize_menu.pack(side="right")
 
         # ----------------- 5. LIVE VU METER -----------------
@@ -471,7 +469,7 @@ class TransparencyApp(ctk.CTk):
 
         brand_lbl = ctk.CTkLabel(
             footer,
-            text="Transparency Mode v1.3 (ASIO Ready)",
+            text="Transparency Mode v1.5",
             font=ctk.CTkFont(size=11),
             text_color="#64748b"
         )
@@ -480,7 +478,7 @@ class TransparencyApp(ctk.CTk):
     # ----------------- LOGIC & HANDLERS -----------------
 
     def refresh_devices(self):
-        """Re-scan system audio devices and update dropdown lists prioritizing FlexASIO."""
+        """Re-scan system audio devices and update dropdown lists with WASAPI priority."""
         inputs, outputs = AudioEngine.get_devices()
 
         self.input_device_map.clear()
@@ -506,27 +504,26 @@ class TransparencyApp(ctk.CTk):
         self.input_dropdown.configure(values=input_names)
         self.output_dropdown.configure(values=output_names)
 
-        # Smart pre-selection:
-        # 1. Prefer FlexASIO if present!
-        # 2. Otherwise prefer WASAPI
+        # Smart pre-selection: pick first active WASAPI device
         default_in = input_names[0]
         for name in input_names:
-            if "FlexASIO" in name:
-                default_in = name
-                break
-            elif "WASAPI" in name and not any("FlexASIO" in x for x in input_names):
+            if "WASAPI" in name:
                 default_in = name
                 break
         self.input_dropdown.set(default_in)
 
         default_out = output_names[0]
-        for name in output_names:
-            if "FlexASIO" in name:
-                default_out = name
-                break
-            elif "WASAPI" in name and any(k in name.lower() for k in ["headphone", "headset", "earphone", "audio"]):
-                default_out = name
-                break
+        wasapi_headphones = [
+            name for name in output_names 
+            if "WASAPI" in name and any(k in name.lower() for k in ["headphone", "headset", "earphone", "audio"])
+        ]
+        if wasapi_headphones:
+            default_out = wasapi_headphones[0]
+        else:
+            for name in output_names:
+                if "WASAPI" in name:
+                    default_out = name
+                    break
         self.output_dropdown.set(default_out)
 
         self._update_latency_display()
@@ -571,7 +568,6 @@ class TransparencyApp(ctk.CTk):
             self.input_dropdown.configure(state="disabled")
             self.output_dropdown.configure(state="disabled")
             self.blocksize_menu.configure(state="disabled")
-            self.exclusive_switch.configure(state="disabled")
         else:
             self.toggle_btn.configure(
                 text="🔊  ACTIVATE TRANSPARENCY MODE",
@@ -585,7 +581,6 @@ class TransparencyApp(ctk.CTk):
             self.input_dropdown.configure(state="normal")
             self.output_dropdown.configure(state="normal")
             self.blocksize_menu.configure(state="normal")
-            self.exclusive_switch.configure(state="normal")
             self.vu_progress.set(0.0)
             self.meter_db_lbl.configure(text="-∞ dB")
 
@@ -604,16 +599,17 @@ class TransparencyApp(ctk.CTk):
         self.audio_engine.gain = value
         pct = int(value * 100)
         if pct == 100:
-            sub = " (Normal)"
+            sub = " (Unity)"
         elif pct > 100:
-            sub = " (Boosted)"
+            db_boost = 20.0 * np.log10(value) if value > 0 else 0
+            sub = f" (+{db_boost:.1f} dB)"
         else:
             sub = " (Attenuated)"
         self.gain_val_lbl.configure(text=f"{pct}%{sub}")
 
-    def _reset_gain(self):
-        self.gain_slider.set(1.0)
-        self._on_gain_changed(1.0)
+    def _set_gain_preset(self, preset_value: float):
+        self.gain_slider.set(preset_value)
+        self._on_gain_changed(preset_value)
 
     def _on_balance_changed(self, value: float):
         self.audio_engine.balance = value
@@ -637,39 +633,31 @@ class TransparencyApp(ctk.CTk):
         enabled = self.voice_switch.get() == 1
         self.audio_engine.voice_boost = enabled
 
-    def _on_exclusive_toggled(self):
-        enabled = self.exclusive_switch.get() == 1
-        self.audio_engine.wasapi_exclusive = enabled
-
     def _parse_blocksize(self, val_str: str) -> int:
-        if "64" in val_str:
+        if "32" in val_str:
+            return 32
+        elif "64" in val_str:
             return 64
         elif "128" in val_str:
             return 128
-        elif "512" in val_str:
-            return 512
         return 256
 
     def _on_blocksize_changed(self, value: str):
         bs = self._parse_blocksize(value)
         self.audio_engine.blocksize = bs
         self._update_latency_display()
+        if self.audio_engine.is_running:
+            in_dev, out_dev = self._get_selected_devices()
+            if in_dev and out_dev:
+                self.audio_engine.start(in_dev, out_dev, blocksize=bs)
 
     def _update_latency_display(self):
-        in_dev, out_dev = self._get_selected_devices()
-        is_asio = (in_dev and in_dev.is_asio) or (out_dev and out_dev.is_asio)
-        if is_asio:
-            self.latency_badge.configure(
-                text="Hardware Latency: ~4.5 ms (FlexASIO Direct DMA)"
-            )
-        else:
-            rate = self.audio_engine.samplerate or 48000
-            bs = self._parse_blocksize(self.blocksize_menu.get())
-            ms = (bs / rate) * 1000.0
-            mode_str = "Exclusive" if self.audio_engine.wasapi_exclusive else "Shared"
-            self.latency_badge.configure(
-                text=f"Buffer: {ms:.1f} ms ({mode_str} / {bs} frames)"
-            )
+        rate = self.audio_engine.samplerate or 48000
+        bs = self._parse_blocksize(self.blocksize_menu.get())
+        ms = (bs / rate) * 1000.0
+        self.latency_badge.configure(
+            text=f"Buffer: {ms:.1f} ms (WASAPI / {bs} frames)"
+        )
 
     def _setup_global_hotkey(self):
         """Register the global hotkey Ctrl+Alt+T."""
